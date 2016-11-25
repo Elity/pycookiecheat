@@ -13,9 +13,9 @@ Adapted from my code at http://n8h.me/HufI1w
 """
 
 import sqlite3
-import os.path
 import keyring
 import sys
+import os
 
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.ciphers import Cipher
@@ -23,6 +23,7 @@ from cryptography.hazmat.primitives.ciphers.algorithms import AES
 from cryptography.hazmat.primitives.ciphers.modes import CBC
 from cryptography.hazmat.primitives.hashes import SHA1
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from win32.win32crypt import CryptUnprotectData
 
 try:
     from urllib.parse import urlparse
@@ -37,7 +38,11 @@ def chrome_cookies(url, cookie_file=None):
     length = 16
 
     def chrome_decrypt(encrypted_value, key=None):
-
+        
+        # on win32 the key is None
+        if not key:
+          return chrome_decrypt_win(encrypted_value)
+          
         # Encrypted cookies should be prefixed with 'v10' according to the
         # Chromium code. Strip it off.
         encrypted_value = encrypted_value[3:]
@@ -60,6 +65,9 @@ def chrome_cookies(url, cookie_file=None):
         decrypted = decryptor.update(encrypted_value) + decryptor.finalize()
 
         return clean(decrypted)
+    
+    def chrome_decrypt_win(encrypted_value):
+        return CryptUnprotectData(encrypted_value)[1].decode()
 
     # If running Chrome on OSX
     if sys.platform == 'darwin':
@@ -77,8 +85,11 @@ def chrome_cookies(url, cookie_file=None):
         cookie_file = cookie_file or os.path.expanduser(
             '~/.config/chromium/Default/Cookies'
         )
+    elif sys.platform.startswith('win32'):
+        iterations = 0
+        cookie_file = cookie_file or os.environ['LOCALAPPDATA'] + r"\Google\Chrome\User Data\Default\Cookies"
     else:
-        raise OSError("This script only works on OSX or Linux.")
+        raise OSError("This script only works on Windows or OSX or Linux.")
 
     # Generate key from values above
     kdf = PBKDF2HMAC(
@@ -88,7 +99,11 @@ def chrome_cookies(url, cookie_file=None):
         iterations=iterations,
         backend=default_backend(),
     )
-    key = kdf.derive(bytes(my_pass))
+    
+    if iterations:
+      key = kdf.derive(bytes(my_pass))
+    else:
+      key = None
 
     # Part of the domain name that will help the sqlite3 query pick it from the
     # Chrome cookies
@@ -106,7 +121,7 @@ def chrome_cookies(url, cookie_file=None):
         for k, v, ev in conn.execute(sql, (host_key,)):
             # if there is a not encrypted value or if the encrypted value
             # doesn't start with the 'v10' prefix, return v
-            if v or (ev[:3] != b'v10'):
+            if v or (ev[:3] != b'v10' and ev[:3] != b'\x01\x00\x00') :
                 cookies_list.append((k, v))
             else:
                 decrypted_tuple = (k, chrome_decrypt(ev, key=key))
